@@ -1,0 +1,8 @@
+# Paket untuk menjalankan dashboard (app.py) di hosting, mis. Streamlit Community Cloud.
+# Skrip lokal (pra_etl_kmeans.py, etl_dw.py) juga butuh: scikit-learn matplotlib openpyxl
+streamlit>=1.40
+pandas>=2.0
+altair>=5.0
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+certifi
