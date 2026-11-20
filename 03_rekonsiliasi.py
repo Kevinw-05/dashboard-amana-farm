@@ -45,12 +45,12 @@ def periksa(excel, con, pra=None, cetak=True):
             got = dw.loc[(kid, r[i][0]), "adg_kg_hari"]; total += 1
             if not np.isclose(exp, got, atol=TOL): salah += 1
     cek("ADG = (BB_t - BB_t-1) / selisih hari", salah == 0, f"({total} nilai diperiksa, selisih={salah})")
-    # 4. pengamanan: ADG pertama kosong, tidak ada kunci yatim
+    # 4. pengamanan: ADG pertama kosong, tidak ada orphan foreign key
     n0 = int(q("select count(*) c from fact_bobot_ternak where adg_kg_hari is null").c[0])
     cek("Penimbangan pertama tiap kambing ber-ADG kosong", n0 == bb.id_kambing.nunique(), f"(null={n0}, kambing={bb.id_kambing.nunique()})")
-    yatim = int(q("""select count(*) c from fact_bobot_ternak f left join dim_segmen s using(id_segmen)
+    orphan = int(q("""select count(*) c from fact_bobot_ternak f left join dim_segmen s using(id_segmen)
                      left join dim_usia u using(id_usia) where s.id_segmen is null or u.id_usia is null""").c[0])
-    cek("Tidak ada kunci asing yatim (segmen/usia)", yatim == 0, f"(yatim={yatim})")
+    cek("Tidak ada orphan foreign key (segmen/usia)", orphan == 0, f"(orphan={orphan})")
     # 5. satu segmen per kambing per rentang umur
     d = int(q("""select count(*) c from (select id_kambing, id_usia from fact_bobot_ternak
                  group by id_kambing, id_usia having count(distinct id_segmen) > 1) x""").c[0])
