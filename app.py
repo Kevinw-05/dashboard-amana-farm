@@ -4,10 +4,14 @@ Jalankan:  python -m streamlit run app.py
 Demo tanpa MySQL: set DB_URL=sqlite:///dw_uji.sqlite (file dibuat oleh etl_dw.py --sqlite dw_uji.sqlite)
 Sumber data: MySQL dw_amana_farm (ubah DB_URL di bawah / variabel lingkungan DB_URL).
 """
+import io
 import os
+import threading
+
 import altair as alt
 import pandas as pd
 import streamlit as st
+import impor
 import queries as q
 
 DB_URL = os.environ.get("DB_URL", "mysql+pymysql://root:@localhost/dw_amana_farm")   # di hosting: diisi lewat Secrets
@@ -209,7 +213,12 @@ def kondisi_terkini():
     return m
 
 # ---- Login (akun di tabel pengguna, MySQL): tanpa login, sisa halaman tidak dijalankan ----
-pengguna = wajib_login(koneksi())
+try:
+    _con = koneksi()
+except Exception as e:                       # mis. berkas SQLite tidak ditemukan
+    st.error(f"Tabel pengguna belum siap atau database tidak terjangkau. Periksa alamat database (DB_URL). Detail: {e}")
+    st.stop()
+pengguna = wajib_login(_con)
 kotak_pengguna(pengguna)
 
 with st.sidebar:
@@ -222,7 +231,9 @@ with st.sidebar:
     st.caption("**FCR** (Feed Conversion Ratio): kg pakan untuk menghasilkan 1 kg pertambahan bobot. Makin kecil makin hemat.")
 
 st.title("Monitoring Bobot Ternak dan Segmentasi K-Means")
-st.caption("PT. Amana Albaroqh Farm | Data Warehouse MySQL | Klasterisasi dihitung pada tahap pra-ETL (Python)")
+_isi = impor.ringkasan_dw(koneksi())
+st.caption("PT. Amana Albaroqh Farm | Data Warehouse MySQL | Klasterisasi dihitung pada tahap pra-ETL (Python)"
+           + (f" | Data sampai {_isi['akhir']:%d-%m-%Y}" if _isi.get("akhir") is not None else ""))
 
 try:
     k = muat("kpi")
@@ -498,3 +509,124 @@ if "Validasi K" in tabs:
         with st.expander("Lihat tabel angka"):
             st.dataframe(v.rename(columns={"k": "K", "inertia_wcss": "WCSS (inertia)", "silhouette": "Silhouette",
                                            "k_terpilih": "Terpilih (1 = ya)"}).round(4), hide_index=True)
+
+
+# ---------------- Import Data (hanya Manajer Operasional) ----------------
+@st.cache_resource
+def kunci_impor():
+    return threading.Lock()          # hanya satu proses import dalam satu waktu
+
+
+if "Import Data" in tabs:
+    with tabs["Import Data"]:
+        petunjuk("<b>Halaman ini menjawab:</b> bagaimana memperbarui dashboard dengan data terbaru? "
+                 "Unggah berkas Excel terbaru, lalu sistem menghitung ulang K-Means, memuat Data Warehouse, "
+                 "dan memeriksa kecocokannya secara otomatis, tanpa perintah PowerShell.")
+        hasil_lalu = st.session_state.pop("hasil_impor", None)
+        if hasil_lalu:
+            st.success(f"Import berhasil. Seluruh halaman kini memakai data baru (K = {hasil_lalu['k']['k']}, "
+                       f"rekonsiliasi {sum(c[1] == 'LULUS' for c in hasil_lalu['rekonsiliasi'])}/{len(hasil_lalu['rekonsiliasi'])} lulus). "
+                       f"Salinan berkas disimpan di {hasil_lalu['arsip']}.")
+            if hasil_lalu.get("k_lama") and hasil_lalu["k_lama"] != hasil_lalu["k"]["k"]:
+                st.warning(f"Jumlah klaster berubah dari K = {hasil_lalu['k_lama']} menjadi K = {hasil_lalu['k']['k']} "
+                           "menurut aturan Elbow + Silhouette. Periksa halaman Validasi K dan Segmentasi.")
+            with st.expander("Lihat hasil rekonsiliasi"):
+                st.dataframe(pd.DataFrame(hasil_lalu["rekonsiliasi"], columns=["Pemeriksaan", "Hasil", "Detail"]), hide_index=True)
+
+        sekarang = impor.ringkasan_dw(koneksi())
+        st.subheader("Data saat ini")
+        r = st.columns(4)
+        r[0].metric("Kambing tercatat", sekarang.get("kambing", "-"))
+        r[1].metric("Data penimbangan", f"{sekarang.get('penimbangan', 0):,}".replace(",", "."))
+        r[2].metric("Hari data pakan", f"{sekarang.get('hari_pakan', 0):,}".replace(",", "."))
+        r[3].metric("Data sampai", f"{sekarang['akhir']:%d-%m-%Y}" if sekarang.get("akhir") is not None else "-")
+
+        st.subheader("Unggah berkas Excel terbaru")
+        with st.expander("Format berkas yang diterima", expanded=False):
+            st.markdown("Unggah **berkas lengkap** (seluruh data sejak awal pencatatan, ditambah data terbaru), bukan hanya "
+                        "baris baru, karena seluruh isi Data Warehouse dibangun ulang dari berkas ini. Nama sheet dan kolom "
+                        "harus sama dengan berkas `Data_Ternak_2022-2026.xlsx`:")
+            st.dataframe(pd.DataFrame([{"Sheet": impor.SHEET[k], "Kolom wajib": ", ".join(v)} for k, v in impor.KOLOM.items()]),
+                         hide_index=True)
+            st.caption("Nilai yang diterima: ras Boer, Etawa, atau PE; jenis kelamin Jantan atau Betina; status Hidup, Terjual, "
+                       "atau Mati. Kambing berstatus Terjual atau Mati wajib memiliki tanggal_keluar.")
+        # Server Streamlit Community Cloud menaruh program di /mount/src; di sana berkas SQLite tidak tersimpan permanen
+        if str(DB_URL).startswith("sqlite:///") and os.path.abspath(__file__).startswith("/mount/src"):
+            st.info("Database saat ini berupa berkas SQLite. Bila dashboard dijalankan di Streamlit Community Cloud, hasil import "
+                    "tidak tersimpan permanen (kembali ke data lama saat aplikasi dimulai ulang). Gunakan database MySQL atau "
+                    "TiDB Cloud untuk versi daring (lihat PANDUAN_DEPLOY.md).")
+
+        kunci_unggah = st.session_state.setdefault("kunci_unggah", 0)
+        berkas = st.file_uploader("Pilih berkas Excel (.xlsx)", type=["xlsx"], key=f"unggah_{kunci_unggah}")
+        if berkas is not None:
+            data_berkas = berkas.getvalue()
+            tanda = (berkas.name, len(data_berkas))
+            if st.session_state.get("periksa_tanda") != tanda:      # periksa sekali per berkas
+                with st.spinner("Memeriksa berkas..."):
+                    st.session_state["periksa_hasil"] = impor.periksa_excel(io.BytesIO(data_berkas))[:3]
+                st.session_state["periksa_tanda"] = tanda
+            salah, awas, baru = st.session_state["periksa_hasil"]
+
+            if salah:
+                st.error("Berkas belum dapat diproses. Perbaiki hal berikut di Excel, lalu unggah ulang. Data saat ini tidak berubah.")
+                for m in salah:
+                    st.markdown(f"- {m}")
+            else:
+                st.success("Berkas lolos pemeriksaan format.")
+                for m in awas:
+                    st.warning(m)
+                banding = []
+                for label, kunci in [("Kambing tercatat", "kambing"), ("Kambing hidup", "hidup"),
+                                     ("Data penimbangan", "penimbangan"), ("Hari data pakan", "hari_pakan")]:
+                    lama = sekarang.get(kunci)
+                    banding.append({"Data": label, "Saat ini": lama if lama is not None else "-", "Berkas baru": baru[kunci],
+                                    "Perubahan": (f"{baru[kunci] - lama:+d}" if lama is not None else "-")})
+                banding.append({"Data": "Data sampai", "Saat ini": f"{sekarang['akhir']:%d-%m-%Y}" if sekarang.get("akhir") is not None else "-",
+                                "Berkas baru": f"{baru['akhir']:%d-%m-%Y}", "Perubahan": ""})
+                st.markdown("**Perbandingan sebelum diproses**")
+                st.dataframe(pd.DataFrame(banding).astype(str), hide_index=True)
+
+                berkurang = [b["Data"] for b in banding[:4] if sekarang.get("kambing") is not None and b["Perubahan"].startswith("-")]
+                yakin = True
+                if berkurang:
+                    st.warning("Jumlah data pada berkas baru lebih sedikit daripada data saat ini (" + ", ".join(berkurang).lower()
+                               + "). Pastikan berkas yang diunggah adalah berkas lengkap, bukan hanya data terbaru.")
+                    yakin = st.checkbox("Saya yakin berkas ini lengkap dan benar")
+
+                with st.expander("Pengaturan lanjutan: jumlah klaster (K)"):
+                    pilih_k = st.radio("Jumlah klaster", ["Otomatis (aturan Elbow + Silhouette, disarankan)", "Tetapkan sendiri"],
+                                       help="Otomatis: K dipilih ulang dengan aturan yang sama seperti pada penelitian.")
+                    k_tetap = None
+                    if pilih_k == "Tetapkan sendiri":
+                        k_tetap = int(st.number_input("K", min_value=2, max_value=8, value=4, step=1))
+
+                if st.button("Proses import", type="primary", disabled=not yakin):
+                    kunci = kunci_impor()
+                    if not kunci.acquire(blocking=False):
+                        st.warning("Import lain sedang berjalan. Tunggu sampai selesai, lalu coba lagi.")
+                    else:
+                        try:
+                            k_lama = None
+                            try:
+                                v_lama = q.validasi_k(koneksi())
+                                k_lama = int(v_lama.loc[v_lama.k_terpilih.astype(int) == 1, "k"].iloc[0])
+                            except Exception:
+                                pass
+                            batang = st.progress(0.0, text="Memulai...")
+                            hasil = impor.proses_impor(data_berkas, koneksi(), folder_program=os.path.dirname(os.path.abspath(__file__)),
+                                                       nama_asli=berkas.name, k=k_tetap,
+                                                       lapor=lambda teks, nilai: batang.progress(nilai, text=teks))
+                        finally:
+                            kunci.release()
+                        st.cache_data.clear()
+                        if hasil["berhasil"]:
+                            hasil["k_lama"] = k_lama
+                            st.session_state["hasil_impor"] = hasil
+                            st.session_state["kunci_unggah"] = kunci_unggah + 1      # kosongkan kotak unggah
+                            st.session_state.pop("periksa_tanda", None)
+                            st.rerun()
+                        else:
+                            st.error(hasil["pesan"])
+                            if hasil["rekonsiliasi"]:
+                                st.dataframe(pd.DataFrame(hasil["rekonsiliasi"], columns=["Pemeriksaan", "Hasil", "Detail"]),
+                                             hide_index=True)

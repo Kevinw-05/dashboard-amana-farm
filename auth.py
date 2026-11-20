@@ -17,11 +17,11 @@ import sys
 import time
 
 NAMA_TAB = {"bobot": "Bobot dan ADG", "segmen": "Segmentasi", "monitor": "Monitoring",
-            "pakan": "Pakan dan FCR", "validasi": "Validasi K"}
+            "pakan": "Pakan dan FCR", "validasi": "Validasi K", "impor": "Import Data"}
 
 PERAN = {
-    "manajer": {"nama": "Manajer Operasional", "tab": ["bobot", "segmen", "monitor", "pakan", "validasi"],
-                "keterangan": "Akses penuh ke semua tab"},
+    "manajer": {"nama": "Manajer Operasional", "tab": ["bobot", "segmen", "monitor", "pakan", "validasi", "impor"],
+                "keterangan": "Akses penuh ke semua tab, termasuk Import Data"},
     "supervisor": {"nama": "Supervisor Peternakan", "tab": ["bobot", "segmen", "monitor"],
                    "keterangan": "Memantau bobot, ADG, segmentasi, dan status kambing"},
     "pakan": {"nama": "Tim Produksi Pakan", "tab": ["pakan"],
