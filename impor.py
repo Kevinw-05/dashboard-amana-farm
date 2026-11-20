@@ -1,13 +1,13 @@
 """
-IMPORT DATA dari dashboard: memeriksa berkas Excel, lalu menjalankan pra-ETL K-Means, ETL, dan rekonsiliasi.
+Import Data dari dashboard: memeriksa berkas Excel, lalu menjalankan pra-ETL K-Means, ETL, dan rekonsiliasi.
 
-Dipakai oleh tab "Import Data" di app.py (hanya Manajer Operasional). Alurnya sama dengan menjalankan
+Dipakai oleh tab "Import Data" di app.py (hanya Manajer Operasional). Hasilnya sama dengan menjalankan
 pra_etl_kmeans.py, etl_dw.py, dan 03_rekonsiliasi.py di PowerShell, tetapi tanpa mengetik perintah.
 
 Pengaman:
-  1. Berkas diperiksa dulu (sheet, kolom, tanggal, angka, kecocokan antarsheet) sebelum data lama disentuh.
-  2. Isi Data Warehouse lama disalin ke memori sebelum dimuat ulang.
-  3. Bila proses gagal atau rekonsiliasi tidak 100% lulus, isi lama dipulihkan, sehingga dashboard tidak pernah kosong.
+  1. Berkas diperiksa lebih dulu (sheet, kolom, tanggal, angka, kecocokan antarsheet) sebelum data lama disentuh.
+  2. Isi Data Warehouse yang lama disalin ke memori sebelum dimuat ulang.
+  3. Bila proses gagal atau rekonsiliasi tidak seluruhnya lulus, isi lama dipulihkan, sehingga dashboard tidak pernah kosong.
 """
 import importlib
 import os
@@ -21,15 +21,17 @@ import pandas as pd
 import etl_dw
 import pra_etl_kmeans
 
+# Nama sheet dan kolom wajib pada berkas Excel
 SHEET = {"ternak": "Data Ternak 2022-2026", "bb": "Data Pencatatan BB", "pakan": "Data Pakan Harian"}
 KOLOM = {
     "ternak": ["id_kambing", "tanggal_lahir", "jenis_kelamin", "ras", "status", "tanggal_keluar"],
     "bb": ["id_kambing", "jenis_kelamin", "ras", "minggu_ke", "tanggal_penimbangan", "berat_badan_kg"],
     "pakan": ["Tanggal", "Total Hijauan (kg)", "Total Konsentrat (kg)", "Total Pakan Harian (kg)"],
 }
+# Nilai yang diterima pada kolom kategori
 NILAI_SAH = {"ras": {"Boer", "Etawa", "PE"}, "jenis_kelamin": {"Jantan", "Betina"}, "status": {"Hidup", "Terjual", "Mati"}}
-FOLDER_PRA = "hasil_pra_etl"
-FOLDER_ARSIP = "arsip_impor"
+FOLDER_PRA = "hasil_pra_etl"     # hasil K-Means terbaru disalin ke sini setelah import berhasil
+FOLDER_ARSIP = "arsip_impor"     # salinan setiap berkas yang berhasil diimpor
 
 
 def _contoh(nilai, n=5):
@@ -41,7 +43,8 @@ def _contoh(nilai, n=5):
 
 def periksa_excel(berkas):
     """Memeriksa berkas Excel. Mengembalikan (kesalahan, peringatan, ringkasan, data).
-    Bila daftar kesalahan tidak kosong, berkas tidak boleh diproses."""
+    Bila daftar kesalahan tidak kosong, berkas tidak boleh diproses. Nomor baris dalam pesan
+    mengikuti nomor baris di Excel (baris 1 = judul kolom)."""
     salah, awas = [], []
     try:
         xls = pd.ExcelFile(berkas)
@@ -62,7 +65,7 @@ def periksa_excel(berkas):
         return salah, awas, {}, {}
 
     t, b, p = d["ternak"], d["bb"], d["pakan"]
-    # ---- tanggal dan angka ----
+    # ---- kolom tanggal dan angka harus terisi dengan benar ----
     for df, kolom, nama in [(t, "tanggal_lahir", SHEET["ternak"]), (b, "tanggal_penimbangan", SHEET["bb"]),
                             (p, "Tanggal", SHEET["pakan"])]:
         df[kolom] = pd.to_datetime(df[kolom], errors="coerce")
@@ -84,7 +87,7 @@ def periksa_excel(berkas):
     if salah:
         return salah, awas, {}, {}
 
-    # ---- isi kolom kategori ----
+    # ---- kolom kategori hanya boleh berisi nilai yang dikenal ----
     for kolom, sah in NILAI_SAH.items():
         for df, nama in ([(t, SHEET["ternak"])] + ([(b, SHEET["bb"])] if kolom != "status" else [])):
             lain = sorted(set(df[kolom].dropna().astype(str)) - sah)
@@ -93,7 +96,7 @@ def periksa_excel(berkas):
                 salah.append(f"Sheet '{nama}', kolom {kolom}: nilai harus {', '.join(sorted(sah))}"
                              + (f"; ditemukan {_contoh(lain)}" if lain else "") + (f"; {kosong} baris kosong" if kosong else "") + ".")
 
-    # ---- kunci dan kecocokan antarsheet ----
+    # ---- id_kambing unik dan cocok antarsheet, tidak ada data ganda ----
     if t["id_kambing"].isna().any() or b["id_kambing"].isna().any():
         salah.append("Kolom id_kambing tidak boleh kosong.")
     ganda = t[t["id_kambing"].duplicated()]["id_kambing"]
@@ -119,7 +122,7 @@ def periksa_excel(berkas):
     if salah:
         return salah, awas, {}, {}
 
-    # ---- populasi aktif: setiap hari pakan harus ada kambing aktif (pembagi pakan per ekor) ----
+    # ---- setiap hari pakan harus ada kambing aktif, karena menjadi pembagi pakan per ekor ----
     akhir_catat = max(p["Tanggal"].max(), b["tanggal_penimbangan"].max())
     mulai, akhir = etl_dw.periode_aktif(t, p["Tanggal"].min(), akhir_catat)
     kosong = [d for d in p["Tanggal"] if not ((mulai <= d) & (d <= akhir)).any()]
@@ -128,7 +131,7 @@ def periksa_excel(berkas):
                      f"{_contoh([d.strftime('%Y-%m-%d') for d in kosong])}. Periksa tanggal lahir dan tanggal keluar.")
         return salah, awas, {}, {}
 
-    # ---- peringatan (boleh diproses) ----
+    # ---- peringatan: berkas tetap boleh diproses ----
     selisih = (p[KOLOM["pakan"][1]] + p[KOLOM["pakan"][2]] - p[KOLOM["pakan"][3]]).abs()
     if (selisih > 0.05).any():
         awas.append(f"{int((selisih > 0.05).sum())} hari pakan: Total Pakan Harian tidak sama dengan Hijauan + Konsentrat. "
@@ -167,6 +170,7 @@ def _salin_isi(con):
 
 
 def _pulihkan(salinan, con):
+    """Mengembalikan isi tabel Data Warehouse dari salinan yang dibuat _salin_isi()."""
     if not salinan:
         return
     if isinstance(con, sqlite3.Connection):
@@ -186,16 +190,17 @@ def _pulihkan(salinan, con):
 
 
 def proses_impor(berkas_excel, con, folder_program=".", nama_asli="data.xlsx", k=None, lapor=lambda teks, nilai: None):
-    """Menjalankan pra-ETL K-Means, ETL, dan rekonsiliasi untuk berkas Excel yang sudah lolos periksa_excel().
-    k=None: jumlah klaster ditentukan aturan Elbow + Silhouette (sama seperti pra_etl_kmeans.py); angka = K dipaksa.
+    """Menjalankan pra-ETL K-Means, ETL, dan rekonsiliasi untuk berkas yang sudah lolos periksa_excel().
+    k=None: K dipilih dengan aturan Elbow + Silhouette (sama seperti pra_etl_kmeans.py); angka: K ditetapkan sendiri.
+    lapor(teks, nilai) dipanggil di setiap tahap untuk mengisi progress bar.
     Mengembalikan dict hasil. Bila gagal, isi Data Warehouse lama dipulihkan."""
-    rekon = importlib.import_module("03_rekonsiliasi")
+    rekon = importlib.import_module("03_rekonsiliasi")    # nama berkas diawali angka, jadi diimpor dengan importlib
     sementara = tempfile.mkdtemp(prefix="impor_")
     excel = os.path.join(sementara, "data.xlsx")
     with open(excel, "wb") as f:
         f.write(berkas_excel if isinstance(berkas_excel, (bytes, bytearray)) else berkas_excel.read())
     pra = os.path.join(sementara, "pra")
-    salinan, dimuat = {}, False
+    salinan, dimuat = {}, False      # dimuat = True setelah tabel Data Warehouse mulai ditimpa
     try:
         lapor("1/4 Menghitung fitur dan K-Means (pra-ETL)...", 0.1)
         k = pra_etl_kmeans.jalankan(excel, pra, k=k, cetak=False)
@@ -212,7 +217,7 @@ def proses_impor(berkas_excel, con, folder_program=".", nama_asli="data.xlsx", k
             _pulihkan(salinan, con)
             return {"berhasil": False, "pesan": f"Rekonsiliasi {lulus}/{len(cek)} lulus, sehingga data lama dipulihkan.",
                     "rekonsiliasi": cek, "k": k}
-        # berhasil: simpan hasil pra-ETL dan arsip berkas di folder program
+        # berhasil: perbarui folder hasil_pra_etl dan simpan salinan berkas di arsip_impor
         tujuan = os.path.join(folder_program, FOLDER_PRA)
         shutil.rmtree(tujuan, ignore_errors=True)
         shutil.copytree(pra, tujuan)

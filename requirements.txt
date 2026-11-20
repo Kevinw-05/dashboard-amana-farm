@@ -1,5 +1,5 @@
-# Paket untuk menjalankan dashboard (app.py), lokal maupun di Streamlit Community Cloud.
-# scikit-learn, matplotlib, dan openpyxl dibutuhkan oleh menu Import Data (pra-ETL K-Means dan membaca Excel).
+# Paket Python untuk seluruh program (dashboard, pra-ETL, ETL, rekonsiliasi, dan Import Data)
+# Pasang dengan: pip install -r requirements.txt
 streamlit>=1.40
 pandas>=2.0
 altair>=5.0

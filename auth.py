@@ -1,12 +1,12 @@
 """
-auth.py - Login dan hak akses per peran; akun pengguna disimpan di tabel `pengguna` (MySQL).
+Login dan hak akses per peran. Akun disimpan di tabel `pengguna` pada database Data Warehouse.
 
-Kata sandi TIDAK disimpan sebagai teks, melainkan hash PBKDF2-SHA256 (bawaan Python).
-Kelola akun dengan buat_pengguna.py (init / daftar / tambah / sandi / aktif).
+Kata sandi tidak disimpan sebagai teks biasa, melainkan sebagai hash PBKDF2-SHA256.
+Akun dikelola dengan buat_pengguna.py (init / daftar / tambah / sandi / aktif).
 
-Peran (kode_peran di tabel -> hak akses tab):
-  manajer    Manajer Operasional   : semua tab
-  supervisor Supervisor Peternakan : Bobot dan ADG, Segmentasi
+Peran dan tab yang boleh dibuka:
+  manajer    Manajer Operasional   : semua tab, termasuk Import Data
+  supervisor Supervisor Peternakan : Bobot dan ADG, Segmentasi, Monitoring
   pakan      Tim Produksi Pakan    : Pakan dan FCR
 """
 import hashlib
@@ -16,9 +16,11 @@ import sqlite3
 import sys
 import time
 
+# Kode tab -> judul tab di dashboard
 NAMA_TAB = {"bobot": "Bobot dan ADG", "segmen": "Segmentasi", "monitor": "Monitoring",
             "pakan": "Pakan dan FCR", "validasi": "Validasi K", "impor": "Import Data"}
 
+# Hak akses: daftar tab yang ditampilkan untuk tiap peran
 PERAN = {
     "manajer": {"nama": "Manajer Operasional", "tab": ["bobot", "segmen", "monitor", "pakan", "validasi", "impor"],
                 "keterangan": "Akses penuh ke semua tab, termasuk Import Data"},
@@ -28,16 +30,17 @@ PERAN = {
               "keterangan": "Memantau konsumsi pakan dan FCR"},
 }
 
-# Akun awal (dipakai buat_pengguna.py init). HANYA untuk demo: ganti kata sandinya.
+# Akun awal yang dibuat oleh "buat_pengguna.py init". Kata sandinya wajib diganti sebelum dipakai.
 AKUN_AWAL = [
     ("manajer", "manajer", "Manajer@2026"),
     ("supervisor", "supervisor", "Supervisor@2026"),
     ("pakan", "pakan", "Pakan@2026"),
 ]
 
-MAKS_GAGAL = 5
-JEDA_KUNCI_DETIK = 60
+MAKS_GAGAL = 5            # login salah berturut-turut sebelum dikunci sementara
+JEDA_KUNCI_DETIK = 60     # lama penguncian
 
+# Struktur tabel akun untuk MySQL/TiDB dan untuk SQLite
 DDL_MYSQL = """CREATE TABLE IF NOT EXISTS pengguna (
   id_pengguna INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(30) NOT NULL UNIQUE,
@@ -56,14 +59,16 @@ DDL_SQLITE = """CREATE TABLE IF NOT EXISTS pengguna (
 )"""
 
 
-# ------------------------------------------------------------------ hash sandi
+# ---------------- Hash kata sandi ----------------
 def buat_hash(kata_sandi, iterasi=200_000):
+    """Hash PBKDF2-SHA256 dengan salt acak; disimpan sebagai algoritma$iterasi$salt$hash."""
     salt = os.urandom(16)
     d = hashlib.pbkdf2_hmac("sha256", kata_sandi.encode("utf-8"), salt, iterasi)
     return f"pbkdf2_sha256${iterasi}${salt.hex()}${d.hex()}"
 
 
 def cek_kata_sandi(kata_sandi, hash_tersimpan):
+    """True bila kata sandi cocok dengan hash yang tersimpan."""
     try:
         algo, iterasi, salt_hex, hash_hex = hash_tersimpan.split("$")
         if algo != "pbkdf2_sha256":
@@ -75,16 +80,17 @@ def cek_kata_sandi(kata_sandi, hash_tersimpan):
         return False
 
 
-_HASH_PALSU = buat_hash("bukan-sandi-sungguhan")   # supaya waktu cek sama walau username tidak ada
+# Hash pembanding untuk username yang tidak ada, agar lama pemeriksaan sama dan username tidak bisa ditebak
+_HASH_PALSU = buat_hash("bukan-sandi-sungguhan")
 
 
-# ------------------------------------------------------------------ akses DB
+# ---------------- Akses database (SQLite atau MySQL) ----------------
 def _sqlite(con):
     return isinstance(con, sqlite3.Connection)
 
 
 def _baca(con, sql, params=None):
-    """Mengembalikan list dict. Mendukung koneksi sqlite3 dan SQLAlchemy Engine."""
+    """Menjalankan SELECT dan mengembalikan daftar dict."""
     params = params or {}
     if _sqlite(con):
         cur = con.execute(sql, params)
@@ -96,6 +102,7 @@ def _baca(con, sql, params=None):
 
 
 def _tulis(con, sql, params=None):
+    """Menjalankan INSERT/UPDATE/CREATE dan mengembalikan jumlah baris yang berubah."""
     params = params or {}
     if _sqlite(con):
         n = con.execute(sql, params).rowcount
@@ -111,13 +118,14 @@ def buat_tabel(con):
 
 
 def ambil_pengguna(con, username):
+    """Data satu akun, atau None bila tidak ada."""
     r = _baca(con, "select username, kode_peran, password_hash, aktif from pengguna where username = :u",
               {"u": username.strip()})
     return r[0] if r else None
 
 
 def verifikasi(con, username, kata_sandi):
-    """Mengembalikan dict {username, kode_peran, nama} bila benar; None bila salah/nonaktif."""
+    """Memeriksa login. Mengembalikan {username, kode_peran, nama} bila benar; None bila salah atau akun nonaktif."""
     u = ambil_pengguna(con, username or "")
     ok = cek_kata_sandi(kata_sandi or "", u["password_hash"] if u else _HASH_PALSU)
     if not (u and ok and int(u["aktif"]) == 1 and u["kode_peran"] in PERAN):
@@ -126,6 +134,7 @@ def verifikasi(con, username, kata_sandi):
 
 
 def tambah_atau_ganti(con, username, kode_peran, kata_sandi):
+    """Menambah akun baru, atau mengganti peran dan kata sandi akun yang sudah ada."""
     if kode_peran not in PERAN:
         raise ValueError(f"kode_peran harus salah satu dari {list(PERAN)}")
     h = buat_hash(kata_sandi)
@@ -139,17 +148,19 @@ def tambah_atau_ganti(con, username, kode_peran, kata_sandi):
 
 
 def tab_untuk(kode_peran):
+    """Judul tab yang boleh dibuka oleh peran ini."""
     return [NAMA_TAB[k] for k in PERAN[kode_peran]["tab"]]
 
 
 def boleh(kode_peran, kunci_tab):
+    """True bila peran ini boleh membuka tab tersebut."""
     return kunci_tab in PERAN.get(kode_peran, {}).get("tab", [])
 
 
-# --------------------------------------------------------------------- tampilan
+# ---------------- Tampilan login ----------------
 def wajib_login(con):
-    """Panggil di app.py sesudah koneksi dibuat. Menampilkan login bila belum masuk
-    dan menghentikan sisa halaman. Mengembalikan dict pengguna bila sudah masuk."""
+    """Menampilkan form login bila pengguna belum masuk, lalu menghentikan sisa halaman.
+    Mengembalikan data pengguna bila sudah masuk."""
     import streamlit as st
 
     p = st.session_state.get("pengguna")
@@ -196,6 +207,7 @@ def wajib_login(con):
 
 
 def kotak_pengguna(user):
+    """Nama, peran, dan tombol Keluar di sidebar."""
     import streamlit as st
     with st.sidebar:
         st.markdown(f"**{user['nama']}**")
@@ -206,6 +218,7 @@ def kotak_pengguna(user):
             st.rerun()
 
 
+# python auth.py hash : membuat hash kata sandi secara manual (jarang diperlukan)
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "hash":
         import getpass

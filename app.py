@@ -1,8 +1,11 @@
 """
-Dashboard Monitoring Bobot Ternak & Segmentasi K-Means - PT. Amana Albaroqh Farm
+Dashboard Monitoring Bobot Ternak dan Segmentasi K-Means - PT. Amana Albaroqh Farm
+
 Jalankan:  python -m streamlit run app.py
-Demo tanpa MySQL: set DB_URL=sqlite:///dw_uji.sqlite (file dibuat oleh etl_dw.py --sqlite dw_uji.sqlite)
-Sumber data: MySQL dw_amana_farm (ubah DB_URL di bawah / variabel lingkungan DB_URL).
+
+Sumber data: Data Warehouse dw_amana_farm. Alamat database diambil dari variabel DB_URL
+(di Streamlit Community Cloud diisi lewat Settings > Secrets); bila kosong, dipakai MySQL lokal XAMPP.
+Tab yang tampil bergantung pada peran pengguna yang login (lihat auth.py).
 """
 import io
 import os
@@ -14,13 +17,13 @@ import streamlit as st
 import impor
 import queries as q
 
-DB_URL = os.environ.get("DB_URL", "mysql+pymysql://root:@localhost/dw_amana_farm")   # di hosting: diisi lewat Secrets
+DB_URL = os.environ.get("DB_URL", "mysql+pymysql://root:@localhost/dw_amana_farm")   # bawaan: MySQL lokal XAMPP
 
 st.set_page_config(page_title="Monitoring Bobot Ternak", layout="wide")
 
 from auth import wajib_login, kotak_pengguna, tab_untuk
 
-# ---------------- Warna dan teks penjelasan ----------------
+# ---------------- Warna dan teks penjelasan segmen ----------------
 WARNA = {"Performa Tinggi": "#2E7D32", "Rata-rata": "#8A9099", "Perlu Perhatian": "#C62828",
          "Tumbuh Cepat, Bobot Rendah": "#E69F00", "Bobot Tinggi, Tumbuh Lambat": "#1565C0",
          "Tidak Diklaster": "#BDBDBD"}
@@ -34,8 +37,9 @@ ARTI_SEGMEN = {
     "Tidak Diklaster": "Data penimbangan pada rentang umur itu belum cukup untuk dinilai.",
 }
 
-# ---- Monitoring: status dari segmen K-Means + bagan kendali Shewhart ----
-STATUS_SEGMEN = {          # segmen (rentang umur terbaru) -> status monitoring
+# ---------------- Aturan status monitoring ----------------
+# Status tiap kambing diturunkan dari segmen K-Means pada rentang umur terbarunya
+STATUS_SEGMEN = {          # segmen -> status monitoring
     "Performa Tinggi": "Normal",
     "Rata-rata": "Normal",
     "Tumbuh Cepat, Bobot Rendah": "Waspada",
@@ -43,6 +47,7 @@ STATUS_SEGMEN = {          # segmen (rentang umur terbaru) -> status monitoring
     "Perlu Perhatian": "Perlu Tindakan",
     "Tidak Diklaster": "Belum Dinilai",
 }
+# Saran yang ditampilkan untuk tiap status
 TINDAK_LANJUT = {
     "Normal": "Pertahankan; performa tinggi dapat dipertimbangkan sebagai calon bibit",
     "Waspada": "Pantau pada penimbangan berikutnya",
@@ -54,7 +59,7 @@ LATAR_STATUS = {"Normal": "#E3F1E4", "Waspada": "#FCEFCF", "Perlu Tindakan": "#F
 ARTI_STATUS = {"Normal": "Sesuai atau di atas sebayanya", "Waspada": "Perlu dipantau",
                "Perlu Tindakan": "Tertinggal dari sebayanya", "Belum Dinilai": "Data belum cukup"}
 
-# Nama kolom yang mudah dibaca
+# Nama kolom tabel yang mudah dibaca, dan keterangan yang muncul saat kursor diarahkan ke judul kolom
 KOLOM = {"id_kambing": "ID Kambing", "ras": "Ras", "jenis_kelamin": "Jenis kelamin", "status": "Keberadaan",
          "status_monitoring": "Status", "segmen": "Segmen", "rentang_umur": "Rentang umur",
          "umur_hari": "Umur (hari)", "bobot_terakhir": "Bobot terakhir (kg)", "tgl_timbang_terakhir": "Timbang terakhir",
@@ -70,18 +75,20 @@ BANTUAN_KOLOM = {
 }
 
 def status_dari_segmen(nama):
+    """Status monitoring dari nama segmen."""
     dasar = str(nama).split(" (klaster")[0]       # nama kembar diberi akhiran "(klaster i)"
     return STATUS_SEGMEN.get(dasar, "Belum Dinilai")
 
 def warna_segmen(nama):
+    """Warna grafik untuk segmen."""
     return WARNA.get(str(nama).split(" (klaster")[0], "#8A9099")
 
 def batas_kendali(nilai):
-    """Shewhart: CL = rata-rata, UCL/LCL = CL +- 3 simpangan baku (Mertens dkk., 2011)."""
+    """Bagan kendali Shewhart: CL = rata-rata, UCL/LCL = CL +- 3 simpangan baku."""
     cl, sd = float(nilai.mean()), float(nilai.std(ddof=1))
     return cl, cl + 3 * sd, cl - 3 * sd
 
-# ---------------- Komponen tampilan ----------------
+# ---------------- Komponen tampilan yang dipakai berulang ----------------
 st.markdown("""<style>
 .block-container {padding-top: 2.2rem; max-width: 1280px;}
 div[data-testid="stMetric"] {background: #FFFFFF; border: 1px solid #DDE5DB; border-radius: 10px; padding: 12px 14px; min-height: 118px;}
@@ -97,13 +104,15 @@ div[data-testid="stMetricLabel"] p {font-size: 0.85rem; color: #4C5A52; white-sp
 </style>""", unsafe_allow_html=True)
 
 def petunjuk(teks):
+    """Kotak "Halaman ini menjawab" di awal setiap tab."""
     st.markdown(f'<div class="petunjuk">{teks}</div>', unsafe_allow_html=True)
 
 def gambar(chart):
+    """Menampilkan grafik Altair selebar halaman."""
     try:
-        st.altair_chart(chart, width="stretch")                  # Streamlit baru
+        st.altair_chart(chart, width="stretch")                  # Streamlit versi baru
     except TypeError:
-        st.altair_chart(chart, use_container_width=True)         # Streamlit lama
+        st.altair_chart(chart, use_container_width=True)         # Streamlit versi lama
 
 def tabel(df, tinggi=None):
     """Tabel dengan nama kolom yang mudah dibaca, keterangan kolom, dan warna pada kolom Status/Segmen."""
@@ -112,18 +121,19 @@ def tabel(df, tinggi=None):
     tiga = ["Rasio ADG", "Rasio bobot", "Skor", "ADG rata-rata (kg/hari)"]
     fmt = {k: ("{:.3f}" if k in tiga else "{:.2f}") for k in d.columns if pd.api.types.is_float_dtype(d[k])}
     gaya = d.style.format(fmt, na_rep="-")
-    pewarna = getattr(gaya, "map", None) or gaya.applymap          # pandas lama memakai applymap
+    pewarna = getattr(gaya, "map", None) or gaya.applymap          # pandas versi lama memakai applymap
     if "Status" in d.columns:
         gaya = pewarna(lambda v: f"background-color: {LATAR_STATUS.get(v, '')}; font-weight: 600", subset=["Status"])
     kw = dict(hide_index=True, column_config=cfg)
     if tinggi:
         kw["height"] = tinggi
     try:
-        st.dataframe(gaya, width="stretch", **kw)                # Streamlit baru
+        st.dataframe(gaya, width="stretch", **kw)                # Streamlit versi baru
     except TypeError:
-        st.dataframe(gaya, use_container_width=True, **kw)       # Streamlit lama
+        st.dataframe(gaya, use_container_width=True, **kw)       # Streamlit versi lama
 
 def grafik_garis(d, x, y, judul_y, warna="#1B6E5A", fmt=".2f"):
+    """Grafik garis per bulan dengan titik dan tooltip."""
     dasar = alt.Chart(d).encode(
         x=alt.X(f"{x}:T", title=None, axis=alt.Axis(format="%b %Y", labelAngle=0, tickCount=8)),
         y=alt.Y(f"{y}:Q", title=judul_y, scale=alt.Scale(zero=False)),
@@ -131,7 +141,8 @@ def grafik_garis(d, x, y, judul_y, warna="#1B6E5A", fmt=".2f"):
     return (dasar.mark_line(color=warna, strokeWidth=2) + dasar.mark_circle(color=warna, size=28)).properties(height=280)
 
 def grafik_kendali(d, judul_y):
-    """Bagan kendali Shewhart. d: kolom periode, nilai, n_ekor. Mengembalikan (grafik, titik di luar batas)."""
+    """Bagan kendali Shewhart. d berisi kolom periode, nilai, n_ekor.
+    Mengembalikan (grafik, baris yang berada di luar batas kendali); titik di luar batas dilingkari merah."""
     cl, ucl, lcl = batas_kendali(d.nilai)
     d = d.assign(di_luar=(d.nilai > ucl) | (d.nilai < lcl))
     luar = d[d.di_luar]
@@ -179,19 +190,22 @@ def peta_klaster(tk, kom, sorot=None):
                  alt.Tooltip("rasio_bobot_centroid:Q", title="Rasio bobot", format=".2f")])
     return (acuan + titik + pusat).properties(height=460)
 
+# ---------------- Koneksi dan pengambilan data ----------------
 @st.cache_resource
 def koneksi():
-    # lokal (XAMPP), cloud dengan TLS (?ssl=true), atau SQLite untuk demo; lihat db.py
+    """Satu koneksi database dipakai bersama oleh semua pengguna (lihat db.py)."""
     from db import buat_koneksi
     return buat_koneksi(DB_URL, thread_aman=True)
 
 @st.cache_data(ttl=300)
 def muat(nama, ras=None):
+    """Menjalankan fungsi query di queries.py; hasil disimpan sementara (cache) selama 5 menit."""
     con = koneksi()
     return getattr(q, nama)(con, ras) if ras is not None else getattr(q, nama)(con)
 
 @st.cache_data(ttl=300)
 def muat_tren(ras, kategori):
+    """Tren bobot dan ADG bulanan sesuai pilihan ras dan kategori usia (cache 5 menit)."""
     return q.tren_bobot(koneksi(), ras, kategori)
 
 def kondisi_terkini():
@@ -201,7 +215,7 @@ def kondisi_terkini():
         on=["id_kambing", "rentang_umur"], how="left")
     seg["tgl_terakhir"] = pd.to_datetime(seg.tgl_terakhir)
     seg = seg.sort_values(["id_kambing", "tgl_terakhir"])
-    # segmen terakhir yang pernah dinilai (keterangan bila rentang terbaru Belum Dinilai)
+    # segmen terakhir yang pernah dinilai, ditampilkan bila rentang umur terbaru masih Belum Dinilai
     dinilai = seg[seg.segmen != "Tidak Diklaster"].groupby("id_kambing").tail(1)
     m = seg.groupby("id_kambing").tail(1).copy()
     m = m.merge(dinilai[["id_kambing", "segmen"]].rename(columns={"segmen": "segmen_dinilai_terakhir"}), on="id_kambing", how="left")
@@ -212,15 +226,16 @@ def kondisi_terkini():
     m["tgl_timbang_terakhir"] = pd.to_datetime(m.tgl_timbang_terakhir).dt.strftime("%Y-%m-%d")
     return m
 
-# ---- Login (akun di tabel pengguna, MySQL): tanpa login, sisa halaman tidak dijalankan ----
+# ---------------- Login: tanpa login, sisa halaman tidak dijalankan ----------------
 try:
     _con = koneksi()
-except Exception as e:                       # mis. berkas SQLite tidak ditemukan
+except Exception as e:                       # database tidak terjangkau atau berkas SQLite tidak ada
     st.error(f"Tabel pengguna belum siap atau database tidak terjangkau. Periksa alamat database (DB_URL). Detail: {e}")
     st.stop()
 pengguna = wajib_login(_con)
 kotak_pengguna(pengguna)
 
+# ---------------- Sidebar, judul, dan angka ringkasan ----------------
 with st.sidebar:
     st.divider()
     st.markdown("**Istilah singkat**")
@@ -255,6 +270,7 @@ st.caption("Persentase status ternak: " + " | ".join(
 nama_tab = tab_untuk(pengguna["kode_peran"])
 tabs = dict(zip(nama_tab, st.tabs(nama_tab)))
 
+# ---------------- Tab Bobot dan ADG ----------------
 if "Bobot dan ADG" in tabs:
     with tabs["Bobot dan ADG"]:
         petunjuk("<b>Halaman ini menjawab:</b> bagaimana perkembangan bobot dan kecepatan tumbuh kambing dari bulan ke bulan? "
@@ -293,6 +309,7 @@ if "Bobot dan ADG" in tabs:
         angka = dasar.mark_text(dy=-7, fontSize=11, color="#1F2A24").encode(text=alt.Text("rata_adg:Q", format=".3f"))
         gambar((batang + angka).properties(height=320))
 
+# ---------------- Tab Segmentasi ----------------
 if "Segmentasi" in tabs:
     with tabs["Segmentasi"]:
         petunjuk("<b>Halaman ini menjawab:</b> kambing terbagi ke dalam kelompok performa apa saja, dan siapa anggotanya? "
@@ -372,6 +389,7 @@ if "Segmentasi" in tabs:
                         "- Titik yang menumpuk di tepi adalah nilai ekstrem yang dibatasi pada persentil 1 dan 99.")
         gambar(peta_klaster(tk[tk.ras.isin(rg) & tk.rentang_umur.isin(ur)], kom, None if pilih_seg == "Semua segmen" else pilih_seg))
 
+# ---------------- Tab Monitoring: status tiap kambing dan bagan kendali ----------------
 if "Monitoring" in tabs:
     with tabs["Monitoring"]:
         petunjuk("<b>Halaman ini menjawab:</b> kambing mana yang perlu ditangani <b>sekarang</b>, dan apakah ada bulan yang tidak wajar? "
@@ -435,6 +453,7 @@ if "Monitoring" in tabs:
         else:
             st.success("Semua bulan berada di dalam batas kendali.")
 
+# ---------------- Tab Pakan dan FCR ----------------
 if "Pakan dan FCR" in tabs:
     with tabs["Pakan dan FCR"]:
         petunjuk("<b>Halaman ini menjawab:</b> berapa banyak pakan yang dipakai, berapa jatah per ekor, dan seberapa efisien pakan "
@@ -471,6 +490,7 @@ if "Pakan dan FCR" in tabs:
                 "sehingga FCR hanya valid di tingkat populasi, tidak dapat dipecah per ras atau per segmen, "
                 "dan nilainya tidak sebanding langsung dengan FCR literatur berbasis bahan kering.")
 
+# ---------------- Tab Validasi K: kurva Elbow dan Silhouette ----------------
 if "Validasi K" in tabs:
     with tabs["Validasi K"]:
         petunjuk("<b>Halaman ini menjawab:</b> mengapa kambing dibagi menjadi 4 segmen, bukan 3 atau 5? "
@@ -511,10 +531,11 @@ if "Validasi K" in tabs:
                                            "k_terpilih": "Terpilih (1 = ya)"}).round(4), hide_index=True)
 
 
-# ---------------- Import Data (hanya Manajer Operasional) ----------------
+# ---------------- Tab Import Data (hanya Manajer Operasional) ----------------
 @st.cache_resource
 def kunci_impor():
-    return threading.Lock()          # hanya satu proses import dalam satu waktu
+    """Kunci bersama agar hanya satu proses import yang berjalan pada satu waktu."""
+    return threading.Lock()
 
 
 if "Import Data" in tabs:
@@ -522,6 +543,7 @@ if "Import Data" in tabs:
         petunjuk("<b>Halaman ini menjawab:</b> bagaimana memperbarui dashboard dengan data terbaru? "
                  "Unggah berkas Excel terbaru, lalu sistem menghitung ulang K-Means, memuat Data Warehouse, "
                  "dan memeriksa kecocokannya secara otomatis, tanpa perintah PowerShell.")
+        # Pesan hasil import sebelumnya (ditampilkan sekali setelah halaman dimuat ulang)
         hasil_lalu = st.session_state.pop("hasil_impor", None)
         if hasil_lalu:
             st.success(f"Import berhasil. Seluruh halaman kini memakai data baru (K = {hasil_lalu['k']['k']}, "
@@ -533,6 +555,7 @@ if "Import Data" in tabs:
             with st.expander("Lihat hasil rekonsiliasi"):
                 st.dataframe(pd.DataFrame(hasil_lalu["rekonsiliasi"], columns=["Pemeriksaan", "Hasil", "Detail"]), hide_index=True)
 
+        # 1. Ringkasan isi Data Warehouse saat ini
         sekarang = impor.ringkasan_dw(koneksi())
         st.subheader("Data saat ini")
         r = st.columns(4)
@@ -541,6 +564,7 @@ if "Import Data" in tabs:
         r[2].metric("Hari data pakan", f"{sekarang.get('hari_pakan', 0):,}".replace(",", "."))
         r[3].metric("Data sampai", f"{sekarang['akhir']:%d-%m-%Y}" if sekarang.get("akhir") is not None else "-")
 
+        # 2. Unggah berkas dan periksa formatnya
         st.subheader("Unggah berkas Excel terbaru")
         with st.expander("Format berkas yang diterima", expanded=False):
             st.markdown("Unggah **berkas lengkap** (seluruh data sejak awal pencatatan, ditambah data terbaru), bukan hanya "
@@ -550,18 +574,18 @@ if "Import Data" in tabs:
                          hide_index=True)
             st.caption("Nilai yang diterima: ras Boer, Etawa, atau PE; jenis kelamin Jantan atau Betina; status Hidup, Terjual, "
                        "atau Mati. Kambing berstatus Terjual atau Mati wajib memiliki tanggal_keluar.")
-        # Server Streamlit Community Cloud menaruh program di /mount/src; di sana berkas SQLite tidak tersimpan permanen
+        # Peringatan bila versi online masih memakai SQLite: di server Streamlit (folder /mount/src) berkas tidak tersimpan permanen
         if str(DB_URL).startswith("sqlite:///") and os.path.abspath(__file__).startswith("/mount/src"):
             st.info("Database saat ini berupa berkas SQLite. Bila dashboard dijalankan di Streamlit Community Cloud, hasil import "
                     "tidak tersimpan permanen (kembali ke data lama saat aplikasi dimulai ulang). Gunakan database MySQL atau "
                     "TiDB Cloud untuk versi daring (lihat PANDUAN_DEPLOY.md).")
 
-        kunci_unggah = st.session_state.setdefault("kunci_unggah", 0)
+        kunci_unggah = st.session_state.setdefault("kunci_unggah", 0)    # diganti untuk mengosongkan kotak unggah
         berkas = st.file_uploader("Pilih berkas Excel (.xlsx)", type=["xlsx"], key=f"unggah_{kunci_unggah}")
         if berkas is not None:
             data_berkas = berkas.getvalue()
             tanda = (berkas.name, len(data_berkas))
-            if st.session_state.get("periksa_tanda") != tanda:      # periksa sekali per berkas
+            if st.session_state.get("periksa_tanda") != tanda:      # berkas yang sama cukup diperiksa sekali
                 with st.spinner("Memeriksa berkas..."):
                     st.session_state["periksa_hasil"] = impor.periksa_excel(io.BytesIO(data_berkas))[:3]
                 st.session_state["periksa_tanda"] = tanda
@@ -575,6 +599,7 @@ if "Import Data" in tabs:
                 st.success("Berkas lolos pemeriksaan format.")
                 for m in awas:
                     st.warning(m)
+                # 3. Perbandingan data saat ini dengan berkas baru
                 banding = []
                 for label, kunci in [("Kambing tercatat", "kambing"), ("Kambing hidup", "hidup"),
                                      ("Data penimbangan", "penimbangan"), ("Hari data pakan", "hari_pakan")]:
@@ -586,6 +611,7 @@ if "Import Data" in tabs:
                 st.markdown("**Perbandingan sebelum diproses**")
                 st.dataframe(pd.DataFrame(banding).astype(str), hide_index=True)
 
+                # Konfirmasi tambahan bila jumlah data berkurang (mungkin yang diunggah hanya data terbaru)
                 berkurang = [b["Data"] for b in banding[:4] if sekarang.get("kambing") is not None and b["Perubahan"].startswith("-")]
                 yakin = True
                 if berkurang:
@@ -600,13 +626,14 @@ if "Import Data" in tabs:
                     if pilih_k == "Tetapkan sendiri":
                         k_tetap = int(st.number_input("K", min_value=2, max_value=8, value=4, step=1))
 
+                # 4. Proses import: pra-ETL K-Means, ETL, dan rekonsiliasi (lihat impor.py)
                 if st.button("Proses import", type="primary", disabled=not yakin):
                     kunci = kunci_impor()
                     if not kunci.acquire(blocking=False):
                         st.warning("Import lain sedang berjalan. Tunggu sampai selesai, lalu coba lagi.")
                     else:
                         try:
-                            k_lama = None
+                            k_lama = None              # K sebelum import, untuk memberi tahu bila K berubah
                             try:
                                 v_lama = q.validasi_k(koneksi())
                                 k_lama = int(v_lama.loc[v_lama.k_terpilih.astype(int) == 1, "k"].iloc[0])
@@ -618,7 +645,7 @@ if "Import Data" in tabs:
                                                        lapor=lambda teks, nilai: batang.progress(nilai, text=teks))
                         finally:
                             kunci.release()
-                        st.cache_data.clear()
+                        st.cache_data.clear()          # semua tab membaca ulang data dari database
                         if hasil["berhasil"]:
                             hasil["k_lama"] = k_lama
                             st.session_state["hasil_impor"] = hasil

@@ -1,0 +1,11 @@
+# Berkas yang tidak diunggah ke GitHub: data peternakan, database lokal, dan kata sandi
+*.xlsx
+*.sqlite
+hasil_pra_etl/
+arsip_impor/
+hasil_rekonsiliasi.csv
+.streamlit/secrets.toml
+
+# Berkas sementara Python
+__pycache__/
+*.pyc

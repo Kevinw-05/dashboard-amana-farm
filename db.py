@@ -1,13 +1,13 @@
 """
-Koneksi basis data yang dipakai bersama oleh app.py, etl_dw.py, 03_rekonsiliasi.py, buat_pengguna.py, dan jalankan_ddl.py.
+Koneksi ke database Data Warehouse. Dipakai bersama oleh app.py, impor.py, etl_dw.py, 03_rekonsiliasi.py,
+buat_pengguna.py, dan jalankan_ddl.py, sehingga cara terhubung cukup diatur di satu tempat.
 
-Bentuk alamat (DB_URL):
-  Lokal (XAMPP)   : mysql+pymysql://root:@localhost/dw_amana_farm
-  Cloud (TLS)     : mysql+pymysql://USER:PASSWORD@HOST:4000/dw_amana_farm?ssl=true
-  Tanpa MySQL     : sqlite:///dw_amana_farm.sqlite   (uji, atau hosting di Streamlit Community Cloud)
+Bentuk alamat database (DB_URL):
+  MySQL lokal (XAMPP) : mysql+pymysql://root:@localhost/dw_amana_farm
+  TiDB Cloud (online) : mysql+pymysql://USER:PASSWORD@HOST:4000/dw_amana_farm?ssl=true
+  SQLite (uji)        : sqlite:///dw_uji.sqlite
 
-Tambahan ?ssl=true mengaktifkan koneksi terenkripsi (TLS) dengan sertifikat CA dari paket certifi.
-Layanan MySQL di cloud (misalnya TiDB Cloud) mewajibkan TLS; MySQL lokal di XAMPP tidak memerlukannya.
+Akhiran ?ssl=true membuat koneksi terenkripsi (TLS). TiDB Cloud mewajibkannya; MySQL lokal tidak.
 """
 import os
 import sqlite3
@@ -16,7 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def _pisah_ssl(url):
-    """Mengembalikan (url tanpa parameter ssl, True bila ssl=true)."""
+    """Memisahkan parameter ssl dari alamat. Mengembalikan (alamat tanpa ssl, True bila ssl=true)."""
     bagian = urlsplit(url)
     param = parse_qsl(bagian.query, keep_blank_values=True)
     pakai_ssl = any(k.lower() == "ssl" and v.lower() in ("1", "true", "yes") for k, v in param)
@@ -25,6 +25,7 @@ def _pisah_ssl(url):
 
 
 def konteks_tls():
+    """Pengaturan TLS dengan daftar sertifikat dari paket certifi (agar sama di Windows dan server Linux)."""
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
@@ -33,10 +34,12 @@ def konteks_tls():
 
 
 def buat_koneksi(url, thread_aman=False):
-    """sqlite:/// -> sqlite3.Connection; selain itu -> SQLAlchemy Engine (dengan TLS bila ?ssl=true)."""
+    """Membuka koneksi sesuai alamat.
+    sqlite:///... menghasilkan sqlite3.Connection; alamat MySQL menghasilkan SQLAlchemy Engine.
+    thread_aman=True dipakai dashboard, karena Streamlit dapat memakai koneksi yang sama dari beberapa thread."""
     if url.startswith("sqlite:///"):
         berkas = url.replace("sqlite:///", "", 1)
-        if not os.path.isabs(berkas):                 # relatif terhadap folder program, bukan folder kerja
+        if not os.path.isabs(berkas):                 # path relatif dihitung dari folder program
             berkas = os.path.join(os.path.dirname(os.path.abspath(__file__)), berkas)
         if not os.path.exists(berkas):
             raise FileNotFoundError(f"File database tidak ditemukan: {berkas}")
@@ -44,5 +47,5 @@ def buat_koneksi(url, thread_aman=False):
     from sqlalchemy import create_engine
     url, pakai_ssl = _pisah_ssl(url)
     connect_args = {"ssl": konteks_tls()} if pakai_ssl else {}
-    # pool_pre_ping & pool_recycle: koneksi ke server cloud yang terputus saat idle dibuka ulang otomatis
+    # pool_pre_ping dan pool_recycle: koneksi yang terputus karena lama tidak dipakai dibuka ulang otomatis
     return create_engine(url, connect_args=connect_args, pool_pre_ping=True, pool_recycle=280)

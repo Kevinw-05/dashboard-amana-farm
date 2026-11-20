@@ -1,16 +1,20 @@
 """
-ETL DATA WAREHOUSE (Python): Extract dari Excel + file hasil pra-ETL, Transform, Load ke MySQL.
+ETL Data Warehouse: Extract dari Excel dan hasil pra-ETL, Transform menjadi tabel dimensi dan fakta,
+lalu Load ke MySQL (atau SQLite untuk uji).
 
-Urutan: 1) python pra_etl_kmeans.py ...   2) jalankan 01_ddl_mysql.sql   3) python etl_dw.py ...   4) python 03_rekonsiliasi.py ...
+Urutan lengkap: pra_etl_kmeans.py -> 01_ddl_mysql.sql -> etl_dw.py -> 03_rekonsiliasi.py
 
-python etl_dw.py --excel Data_Ternak_2022-2026.xlsx --pra hasil_pra_etl
-python etl_dw.py --excel ... --pra hasil_pra_etl --mysql "mysql+pymysql://root:@localhost/dw_amana_farm"
-python etl_dw.py --excel ... --pra hasil_pra_etl --sqlite dw_uji.sqlite   # tanpa MySQL (uji, atau hosting di Streamlit Cloud)
+    python etl_dw.py --excel Data_Ternak_2022-2026.xlsx --pra hasil_pra_etl
+    python etl_dw.py --excel Data_Ternak_2022-2026.xlsx --pra hasil_pra_etl --mysql "ALAMAT_DATABASE"
+    python etl_dw.py --excel Data_Ternak_2022-2026.xlsx --pra hasil_pra_etl --sqlite dw_uji.sqlite
+
+Tanpa --mysql maupun --sqlite, data dimuat ke MySQL lokal: mysql+pymysql://root:@localhost/dw_amana_farm
 """
 import argparse, os, sqlite3
 import pandas as pd
-from pra_etl_kmeans import kelompok_umur   # aturan rentang umur yang sama dengan tahap pra-ETL
+from pra_etl_kmeans import kelompok_umur   # rentang umur harus sama persis dengan tahap pra-ETL
 
+# Urutan pengisian tabel: dimensi lebih dulu, baru fakta (mengikuti foreign key)
 URUTAN_MUAT = ["dim_waktu", "dim_kambing", "dim_usia", "dim_segmen", "fact_bobot_ternak", "fact_konsumsi_pakan",
                "hasil_klaster", "hasil_validasi_k"]
 
@@ -19,14 +23,14 @@ def periode_aktif(ternak, awal_catat, akhir_catat):
     """Masa aktif tiap kambing untuk menghitung populasi aktif harian.
     Mulai  = tanggal lahir, atau tanggal pencatatan pertama bagi kambing yang lahir sebelum pencatatan dimulai.
     Akhir  = tanggal keluar (terjual/mati), atau tanggal data terakhir bagi kambing yang masih hidup.
-    Keduanya diambil dari data, sehingga tetap benar ketika Excel diperbarui."""
+    Kedua batas diambil dari data, sehingga tetap benar ketika Excel diperbarui."""
     mulai = ternak.tanggal_lahir.where(ternak.tanggal_lahir >= awal_catat, awal_catat)
     akhir = ternak.tanggal_keluar.where(ternak.status != "Hidup", akhir_catat)
     return mulai, akhir
 
 
 def transformasi(excel, pra, rentang="halus"):
-    """Extract + Transform. Mengembalikan dict {nama_tabel: DataFrame} sesuai URUTAN_MUAT."""
+    """Extract dan Transform. Mengembalikan {nama_tabel: DataFrame} untuk semua tabel di URUTAN_MUAT."""
     ternak = pd.read_excel(excel, "Data Ternak 2022-2026", parse_dates=["tanggal_lahir", "tanggal_keluar"])
     bb = pd.read_excel(excel, "Data Pencatatan BB", parse_dates=["tanggal_penimbangan"])
     pakan = pd.read_excel(excel, "Data Pakan Harian", parse_dates=["Tanggal"])
@@ -35,17 +39,17 @@ def transformasi(excel, pra, rentang="halus"):
     lab = pd.read_csv(f"{pra}/label_klaster.csv")
     val = pd.read_csv(f"{pra}/validasi_k.csv")
 
-    # dim_waktu
+    # dim_waktu: satu baris per tanggal yang muncul di data penimbangan atau data pakan
     t = pd.DataFrame({"tanggal": sorted(pd.concat([bb.tanggal_penimbangan, pakan.Tanggal]).drop_duplicates())})
     t.insert(0, "id_waktu", range(1, len(t) + 1))
     t["hari"] = t.tanggal.dt.day; t["minggu_ke_tahun"] = t.tanggal.dt.isocalendar().week.astype(int)
     t["bulan"] = t.tanggal.dt.month; t["nama_bulan"] = t.tanggal.dt.month_name()
     t["kuartal"] = t.tanggal.dt.quarter; t["tahun"] = t.tanggal.dt.year
 
-    # dim_kambing
+    # dim_kambing: atribut tetap tiap kambing
     dk = ternak[["id_kambing", "tanggal_lahir", "jenis_kelamin", "ras", "status", "tanggal_keluar"]]
 
-    # fact_bobot_ternak
+    # fact_bobot_ternak: satu baris per penimbangan, dengan ADG, umur, rentang umur, dan segmen
     f = bb.sort_values(["id_kambing", "tanggal_penimbangan"]).merge(
         ternak[["id_kambing", "tanggal_lahir"]], on="id_kambing")
     f["selisih_hari"] = f.groupby("id_kambing").tanggal_penimbangan.diff().dt.days
@@ -62,14 +66,14 @@ def transformasi(excel, pra, rentang="halus"):
     fb = f[["id_kambing", "id_waktu", "id_usia", "id_segmen", "minggu_ke", "umur_hari",
             "berat_badan_kg", "selisih_hari", "selisih_bobot_kg", "adg_kg_hari"]]
 
-    # hasil_klaster (satu baris per kambing per rentang umur yang ikut K-Means)
+    # hasil_klaster: satu baris per kambing per rentang umur yang ikut K-Means (bahan peta klaster)
     hk = lab.merge(usia[["id_usia", "rentang_umur"]], left_on="kelompok_umur", right_on="rentang_umur") \
             .merge(seg[["id_segmen", "nama_segmen"]], left_on="segmen", right_on="nama_segmen")
     hk = hk[["id_kambing", "id_usia", "id_segmen", "n_timbang", "n_adg", "rata_adg", "rata_bobot",
              "rasio_adg_asli", "rasio_bobot_asli", "rasio_adg", "rasio_bobot"]]
     assert len(hk) == len(lab), "label klaster tidak cocok dengan dim_usia / dim_segmen"
 
-    # fact_konsumsi_pakan
+    # fact_konsumsi_pakan: satu baris per hari; pakan per ekor = total pakan / populasi aktif
     mulai, akhir = periode_aktif(ternak, pakan.Tanggal.min(), max(pakan.Tanggal.max(), bb.tanggal_penimbangan.max()))
     p = pakan.merge(t[["id_waktu", "tanggal"]], left_on="Tanggal", right_on="tanggal")
     p["populasi_aktif"] = p.Tanggal.map(lambda d: int(((mulai <= d) & (d <= akhir)).sum()))
@@ -83,7 +87,7 @@ def transformasi(excel, pra, rentang="halus"):
 
 
 def muat_sqlite(hasil, con):
-    """Load ke SQLite. Tabel data warehouse dibuat ulang; tabel pengguna (akun login) TIDAK disentuh."""
+    """Load ke SQLite. Tabel Data Warehouse dibuat ulang; tabel pengguna (akun login) tidak disentuh."""
     for n in URUTAN_MUAT:
         d = hasil[n].copy()
         for c in d.columns:
@@ -94,7 +98,7 @@ def muat_sqlite(hasil, con):
 
 
 def muat_mysql(hasil, eng):
-    """Load ke MySQL: kosongkan tabel (TRUNCATE), lalu isi ulang. Tabel pengguna tidak disentuh."""
+    """Load ke MySQL/TiDB: kosongkan tabel (TRUNCATE), lalu isi ulang. Tabel pengguna tidak disentuh."""
     from sqlalchemy import text
     with eng.begin() as c:
         c.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
@@ -106,7 +110,7 @@ def muat_mysql(hasil, eng):
 
 
 def muat(hasil, con):
-    """Load ke koneksi apa pun yang dibuat db.buat_koneksi (sqlite3.Connection atau SQLAlchemy Engine)."""
+    """Load ke koneksi dari db.buat_koneksi(), baik SQLite maupun MySQL/TiDB."""
     if isinstance(con, sqlite3.Connection):
         muat_sqlite(hasil, con)
     else:
@@ -116,8 +120,8 @@ def muat(hasil, con):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--excel", required=True); ap.add_argument("--pra", required=True)
-    ap.add_argument("--sqlite", help="opsional: muat ke file SQLite (untuk uji tanpa MySQL)")
-    ap.add_argument("--mysql", default=None, help="URL MySQL; bawaan mysql+pymysql://root:@localhost/dw_amana_farm"); ap.add_argument("--rentang", default="halus")
+    ap.add_argument("--sqlite", help="muat ke berkas SQLite (uji tanpa MySQL)")
+    ap.add_argument("--mysql", default=None, help="alamat MySQL/TiDB; bawaan mysql+pymysql://root:@localhost/dw_amana_farm"); ap.add_argument("--rentang", default="halus")
     a = ap.parse_args()
     if not a.sqlite and not a.mysql:
         a.mysql = "mysql+pymysql://root:@localhost/dw_amana_farm"
@@ -129,7 +133,7 @@ def main():
             print("sqlite", n, con.execute(f"select count(*) from {n}").fetchone()[0])
     if a.mysql:
         from db import buat_koneksi
-        muat_mysql(hasil, buat_koneksi(a.mysql))          # mendukung ?ssl=true untuk server cloud
+        muat_mysql(hasil, buat_koneksi(a.mysql))          # alamat TiDB Cloud diakhiri ?ssl=true
         for n in URUTAN_MUAT:
             print("mysql", n, len(hasil[n]))
         print("MySQL terisi.")
